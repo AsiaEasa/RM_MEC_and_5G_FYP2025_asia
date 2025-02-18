@@ -9,25 +9,29 @@
 #include <vector>
 #include <tuple>
 #include <random>
+#include <cstdint>  // لاستخدام uint8_t
+#include <cstring>  // يمكن أن تكون مفيدة للبعض العمليات على البيانات
+
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("IoT_FL_Simulation");
 
-// بنية الجهاز
-struct IoTDevice {
-    double cpuFrequency; // CPU - cycle freqyency for local training
-    double energy; //Energy level for client k
-    double bandwidth; // wireless bandwidth for client k
-    bool wirelessCharging;
+// تعريف هيكل بيانات الحزمة
+struct ResourcePacket {
+    double cpuFrequency;  // التردد المركزي (GHz)
+    double energy;        // الطاقة (Joules)
+    double bandwidth;     // عرض النطاق الترددي (Mbps)
+    bool wirelessCharging; // هل يوجد شحن لاسلكي
 
-    IoTDevice(double cpu, double e, double bw, bool charge)
+    // Constructor for easy initialization
+    ResourcePacket(double cpu, double e, double bw, bool charge)
         : cpuFrequency(cpu), energy(e), bandwidth(bw), wirelessCharging(charge) {}
 };
 
 // إنشاء الاجهزه وبياناتها 
-std::vector<IoTDevice> GenerateIoTDevices(int numDevices) {
-    std::vector<IoTDevice> devices;
+std::vector<ResourcePacket> GenerateIoTDevices(int numDevices) {
+    std::vector<ResourcePacket> devices;
     std::default_random_engine generator;
     std::uniform_real_distribution<double> cpuDist(0.1, 1.0); // توزيع CPU بين 0.1 و 1.0 GHz
     std::uniform_real_distribution<double> bandwidthDist(0.1, 2.0); // توزيع عرض النطاق بين 0.1 و 2.0 Mbps
@@ -43,10 +47,14 @@ std::vector<IoTDevice> GenerateIoTDevices(int numDevices) {
     return devices;
 }
 
+int numIoTDevices = 4;
+std::vector<ResourcePacket> devicesData = GenerateIoTDevices(numIoTDevices);
+
 // دالة لحساب استهلاك الطاقة
 double ComputeEnergyConsumption(double cpuFreq, double tau, double mu, double G) {
     return cpuFreq * cpuFreq * tau * (mu * 1e6) * G;
 }
+
 
 // دالة لمحاكاة وصول الطاقة باستخدام توزيع بواسون
 // تستبدل بي RF
@@ -56,10 +64,10 @@ int GenerateChargingEnergy(double avgRate) {
     return distribution(generator);
 }
 
+
 int main(int argc, char *argv[]) {
     LogComponentEnable("IoT_FL_Simulation", LOG_LEVEL_INFO);
-
-    int numIoTDevices = 4;
+    
     NodeContainer sensorNodes, gatewayNode;
     sensorNodes.Create(numIoTDevices);
     gatewayNode.Create(1); // بستبدله بي الخادم الطرفي لامه بيأدي هنا نفس مهامه
@@ -97,7 +105,6 @@ int main(int argc, char *argv[]) {
     mobility.Install(gatewayNode);
 
     // إنشاء الأجهزة وطباعة بياناتها
-    std::vector<IoTDevice> devicesData = GenerateIoTDevices(numIoTDevices);
     for (int i = 0; i < numIoTDevices; i++) {
         NS_LOG_INFO("Device " << i + 1 << " -> CPU: " << devicesData[i].cpuFrequency 
                                << " GHz, Energy: " << devicesData[i].energy 
@@ -135,22 +142,34 @@ int main(int argc, char *argv[]) {
                      << devicesData[id].energy << " J");
     }
 
-    // إعداد التواصل بين الأجهزة والبوابة
-    UdpEchoServerHelper echoServer(9);
-    ApplicationContainer serverApps = echoServer.Install(gatewayNode.Get(0));
-    serverApps.Start(Seconds(1.0));
-    serverApps.Stop(Seconds(10.0));
 
-    for (int i = 0; i < numIoTDevices; i++) {
-        UdpEchoClientHelper echoClient(Ipv4Address("10.1.1.1"), 9);
-        echoClient.SetAttribute("MaxPackets", UintegerValue(5));
-        echoClient.SetAttribute("Interval", TimeValue(Seconds(1.0)));
-        echoClient.SetAttribute("PacketSize", UintegerValue(512));
+// إرسال بيانات الموارد عبر UDP
+for (int i = 0; i < numIoTDevices; i++) {
+    // استخدم UdpEchoClientHelper لإرسال الحزم
+    UdpEchoClientHelper echoClient(Ipv4Address("10.1.1.1"), 9); // عنوان السيرفر ورقم المنفذ
+    echoClient.SetAttribute("MaxPackets", UintegerValue(1)); // إرسال حزمة واحدة
+    echoClient.SetAttribute("Interval", TimeValue(Seconds(1.0))); // فترة الإرسال بين الحزم
+    echoClient.SetAttribute("PacketSize", UintegerValue(512)); // حجم الحزمة (يجب أن يكون أكبر من حجم البيانات التي ترسلها)
 
-        ApplicationContainer clientApps = echoClient.Install(sensorNodes.Get(i));
-        clientApps.Start(Seconds(2.0 + i));
-        clientApps.Stop(Seconds(10.0));
-    }
+    // تخصيص البيانات التي سيتم إرسالها
+    Ptr<Packet> packet = Create<Packet>(sizeof(ResourcePacket)); // تخصيص حزمة بناءً على حجم `ResourcePacket`
+    Ptr<Packet> udpPacket = Create<Packet>(reinterpret_cast<uint8_t*>(&devicesData[i]), sizeof(ResourcePacket));
+
+    // إرسال الحزمة عبر العميل
+    ApplicationContainer clientApps = echoClient.Install(sensorNodes.Get(i));
+    clientApps.Start(Seconds(2.0 + i)); // تأخير في البداية لكل جهاز
+    clientApps.Stop(Seconds(10.0)); // وقف التطبيق بعد وقت محدد
+
+    // إرسال البيانات الفعلية عبر الـ socket
+    Ptr<Socket> socket = Socket::CreateSocket(sensorNodes.Get(i), TypeId::LookupByName("ns3::UdpSocketFactory"));
+    socket->SendTo(packet, 0, InetSocketAddress(Ipv4Address("10.1.1.1"), 9)); // إرسال الحزمة إلى السيرفر
+}
+
+// إنشاء السيرفر لاستقبال الحزم عبر UDP
+UdpEchoServerHelper echoServer(9); // نفس المنفذ الذي حددناه في العميل
+ApplicationContainer serverApps = echoServer.Install(gatewayNode.Get(0)); // البوابة هنا تعمل كسيرفر
+serverApps.Start(Seconds(1.0)); // بدأ السيرفر بعد ثانية واحدة
+serverApps.Stop(Seconds(10.0)); // توقيف السيرفر بعد 10 ثوانٍ
 
     // دعم NetAnim
     AnimationInterface anim("iot-simulation.xml");
