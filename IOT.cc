@@ -11,6 +11,9 @@
 #include <random>
 #include <cstdint>  // لاستخدام uint8_t
 #include <cstring>  // يمكن أن تكون مفيدة للبعض العمليات على البيانات
+#include "ns3/wifi-module.h"
+#include "ns3/yans-wifi-helper.h"
+#include "ns3/mobility-helper.h"
 
 
 using namespace ns3;
@@ -49,20 +52,6 @@ std::vector<ResourcePacket> GenerateIoTDevices(int numDevices) {
 int numIoTDevices = 4;
 std::vector<ResourcePacket> devicesData = GenerateIoTDevices(numIoTDevices);
 
-// دالة SendResourceData
-void SendResourceData(Ptr<Node> node, Ipv4Address serverAddress, uint16_t port) {
-    ResourcePacket& device = devicesData[node->GetId()];
-    ResourcePacket packet(device.cpuFrequency, device.energy, device.bandwidth, device.wirelessCharging);
-
-    Ptr<Packet> udpPacket = Create<Packet>((uint8_t*)&packet, sizeof(ResourcePacket));
-
-    Ptr<Socket> socket = Socket::CreateSocket(node, TypeId::LookupByName("ns3::UdpSocketFactory"));
-
-    InetSocketAddress destAddr(serverAddress, port);
-    socket->SendTo(udpPacket, 0, destAddr);
-}
-
-
 
 // دالة لحساب استهلاك الطاقة
 double ComputeEnergyConsumption(double cpuFreq, double tau, double mu, double G) {
@@ -81,44 +70,61 @@ int GenerateChargingEnergy(double avgRate) {
 
 int main(int argc, char *argv[]) {
     LogComponentEnable("IoT_FL_Simulation", LOG_LEVEL_INFO);
-    
-    NodeContainer sensorNodes, gatewayNode;
+
+    NodeContainer sensorNodes, gatewayNode, enbNodes;
     sensorNodes.Create(numIoTDevices);
-    gatewayNode.Create(1); // بستبدله بي الخادم الطرفي لامه بيأدي هنا نفس مهامه
+    gatewayNode.Create(1);
+    enbNodes.Create(1);
 
-    // إعداد الشبكة
-    // استبدلو بي الجيل الخامس
-    PointToPointHelper p2p;
-    p2p.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
-    p2p.SetChannelAttribute("Delay", StringValue("2ms"));
-
-    NetDeviceContainer devices;
-    for (int i = 0; i < numIoTDevices; i++) {
-        devices.Add(p2p.Install(sensorNodes.Get(i), gatewayNode.Get(0)));
-    }
-
+    // تثبيت البروتوكولات على العقد
     InternetStackHelper internet;
     internet.Install(sensorNodes);
     internet.Install(gatewayNode);
 
+    WifiHelper wifi;
+    wifi.SetStandard(WIFI_STANDARD_80211n);
+
+    // إعداد القناة الفيزيائية
+    YansWifiPhyHelper phy;
+    YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
+    phy.SetChannel(channel.Create());
+    
+    // إعداد MAC
+    WifiMacHelper mac;
+    mac.SetType("ns3::AdhocWifiMac");
+    
+    // تثبيت أجهزة Wi-Fi على الأجهزة
+    NetDeviceContainer wifiDevices;
+    wifiDevices = wifi.Install(phy, mac, sensorNodes);
+    wifiDevices = wifi.Install(phy, mac, gatewayNode);
+
+    // تعيين عناوين IP
     Ipv4AddressHelper ipv4;
     ipv4.SetBase("10.1.1.0", "255.255.255.0");
-    ipv4.Assign(devices);
+    Ipv4InterfaceContainer wifiInterfaces = ipv4.Assign(wifiDevices);
 
-    // إعداد الحركة للأجهزة
     MobilityHelper mobility;
     Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
+    
+    // تحديد مواقع الأجهزة
     for (int i = 0; i < numIoTDevices; i++) {
         positionAlloc->Add(Vector(i * 10, 20, 0));
     }
-    positionAlloc->Add(Vector(50, 50, 0)); // موقع الـ Gateway
-
+    
+    // إضافة مواقع لعقد الشبكة الأخرى
+    positionAlloc->Add(Vector(50, 50, 0)); // gatewayNode
+    positionAlloc->Add(Vector(60, 60, 0)); // enbNode
+    positionAlloc->Add(Vector(70, 70, 0)); // pgw
+    
     mobility.SetPositionAllocator(positionAlloc);
     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
+    
+    // تطبيق الحركة على جميع العقد
     mobility.Install(sensorNodes);
     mobility.Install(gatewayNode);
+    mobility.Install(enbNodes);
+    
 
-    // إنشاء الأجهزة وطباعة بياناتها
     for (int i = 0; i < numIoTDevices; i++) {
         NS_LOG_INFO("Device " << i + 1 << " -> CPU: " << devicesData[i].cpuFrequency 
                                << " GHz, Energy: " << devicesData[i].energy 
@@ -127,8 +133,6 @@ int main(int argc, char *argv[]) {
                                << (devicesData[i].wirelessCharging ? "Yes" : "No"));
     }
 
-    // اختيار الأجهزة للتدريب
-    // هنا حيدخل كود الخوارزميه
     std::vector<int> selectedDevices;
     for (int i = 0; i < numIoTDevices; i++) {
         if (devicesData[i].energy > 2000 && devicesData[i].cpuFrequency >= 0.2) {
@@ -137,70 +141,44 @@ int main(int argc, char *argv[]) {
     }
     NS_LOG_INFO("Selected devices for federated training: " << selectedDevices.size());
 
-    // إعداد متغيرات استهلاك وإعادة شحن الطاقة
-    double avgEnergyArrivalRate = 5.0;  // معدل وصول الطاقة
-    double tau = 1e-28;  // Effective switched capacitance
-    double mu = 1e6;  // 1 MB محولة إلى بايت - corresponding training data requirements - دي بحددها السيرفر
-    double G = 7000;  //   Number of CPU cycle required to process one bit local data
+    double avgEnergyArrivalRate = 5.0;
+    double tau = 1e-28;
+    double mu = 1e6;
+    double G = 7000;
 
-    // تنفيذ عملية التعلم الفيدرالي وتحديث الطاقة
     for (int id : selectedDevices) {
-
         double energyConsumed = ComputeEnergyConsumption(devicesData[id].cpuFrequency, tau, mu, G);
         int chargingEnergy = GenerateChargingEnergy(avgEnergyArrivalRate);
-
-        // تحديث حالة الطاقة
         devicesData[id].energy = std::max(devicesData[id].energy - energyConsumed + chargingEnergy, 0.0);
-
         NS_LOG_INFO("Device " << id + 1 << " trained the model and sent updates, remaining energy: " 
                      << devicesData[id].energy << " J");
     }
 
-
-// إرسال بيانات الموارد عبر UDP
-for (int i = 0; i < numIoTDevices; i++) {
-    // استخدم UdpEchoClientHelper لإرسال الحزم
-    UdpEchoClientHelper echoClient(Ipv4Address("10.1.1.1"), 9); // عنوان السيرفر ورقم المنفذ
-    echoClient.SetAttribute("MaxPackets", UintegerValue(1)); // إرسال حزمة واحدة
-    echoClient.SetAttribute("Interval", TimeValue(Seconds(1.0))); // فترة الإرسال بين الحزم
-    echoClient.SetAttribute("PacketSize", UintegerValue(512)); // حجم الحزمة (يجب أن يكون أكبر من حجم البيانات التي ترسلها)
-
-    // تخصيص البيانات التي سيتم إرسالها
-    Ptr<Packet> packet = Create<Packet>(sizeof(ResourcePacket)); // تخصيص حزمة بناءً على حجم `ResourcePacket`
-    Ptr<Packet> udpPacket = Create<Packet>(reinterpret_cast<uint8_t*>(&devicesData[i]), sizeof(ResourcePacket));
-
-    // إرسال الحزمة عبر العميل
-    ApplicationContainer clientApps = echoClient.Install(sensorNodes.Get(i));
-    clientApps.Start(Seconds(2.0 + i)); // تأخير في البداية لكل جهاز
-    clientApps.Stop(Seconds(10.0)); // وقف التطبيق بعد وقت محدد
-
-    // إرسال البيانات الفعلية عبر الـ socket
-    Ptr<Socket> socket = Socket::CreateSocket(sensorNodes.Get(i), TypeId::LookupByName("ns3::UdpSocketFactory"));
-    socket->SendTo(packet, 0, InetSocketAddress(Ipv4Address("10.1.1.1"), 9)); // إرسال الحزمة إلى السيرفر
-}
-
-// إنشاء السيرفر لاستقبال الحزم عبر UDP
-UdpEchoServerHelper echoServer(9); // نفس المنفذ الذي حددناه في العميل
-ApplicationContainer serverApps = echoServer.Install(gatewayNode.Get(0)); // البوابة هنا تعمل كسيرفر
-serverApps.Start(Seconds(1.0)); // بدأ السيرفر بعد ثانية واحدة
-serverApps.Stop(Seconds(10.0)); // توقيف السيرفر بعد 10 ثوانٍ
-
-    // دعم NetAnim
-    AnimationInterface anim("iot-simulation.xml");
-    for (uint32_t i = 0; i < sensorNodes.GetN(); i++) {
-        anim.SetConstantPosition(sensorNodes.Get(i), i * 10, 20);
+    PacketSinkHelper packetSinkHelper("ns3::UdpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), 9));
+    ApplicationContainer sinkApp = packetSinkHelper.Install(gatewayNode.Get(0));
+    sinkApp.Start(Seconds(1.0));
+    sinkApp.Stop(Seconds(10.0));
+    
+    // إعداد تطبيق OnOff لتوليد البيانات
+    OnOffHelper onoff("ns3::UdpSocketFactory", InetSocketAddress(wifiInterfaces.GetAddress(0), 9));
+    onoff.SetAttribute("DataRate", StringValue("500kbps"));
+    onoff.SetAttribute("PacketSize", UintegerValue(sizeof(ResourcePacket)));
+    
+    for (int i = 0; i < numIoTDevices; i++) {
+        ApplicationContainer clientApp = onoff.Install(sensorNodes.Get(i));
+        clientApp.Start(Seconds(2.0 + i));
+        clientApp.Stop(Seconds(10.0));
     }
-    anim.SetConstantPosition(gatewayNode.Get(0), 50, 50);
 
-    anim.UpdateNodeColor(sensorNodes.Get(0), 255, 0, 0);  
-    anim.UpdateNodeColor(gatewayNode.Get(0), 0, 0, 255);  
-
-    anim.EnablePacketMetadata(true);  
-    anim.EnableIpv4RouteTracking("route-tracking.xml", Seconds(0), Seconds(10), Seconds(0.25));
-
+    AnimationInterface anim("iot-simulation.xml");
     Simulator::Stop(Seconds(20.0));
     Simulator::Run();
+    for (uint32_t i = 0; i < NodeList::GetNNodes(); i++) { // دي تجربه عشان كان في ايرور في الانيميشن فيه عقد مامعمول ليها موبيليتي
+        Ptr<Node> node = NodeList::GetNode(i);
+        if (node->GetObject<MobilityModel>() == nullptr) {
+            std::cout << "تحذير: العقدة " << i << " ليس لديها نموذج حركة!" << std::endl;
+        }
+    }    
     Simulator::Destroy();
-
     return 0;
 }
