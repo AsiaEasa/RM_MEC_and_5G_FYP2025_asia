@@ -16,7 +16,6 @@
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("IoT_FL_Simulation");
-
 // تعريف هيكل بيانات الحزمة
 struct ResourcePacket {
     double cpuFrequency;  // التردد المركزي (GHz)
@@ -49,6 +48,21 @@ std::vector<ResourcePacket> GenerateIoTDevices(int numDevices) {
 
 int numIoTDevices = 4;
 std::vector<ResourcePacket> devicesData = GenerateIoTDevices(numIoTDevices);
+
+// دالة SendResourceData
+void SendResourceData(Ptr<Node> node, Ipv4Address serverAddress, uint16_t port) {
+    ResourcePacket& device = devicesData[node->GetId()];
+    ResourcePacket packet(device.cpuFrequency, device.energy, device.bandwidth, device.wirelessCharging);
+
+    Ptr<Packet> udpPacket = Create<Packet>((uint8_t*)&packet, sizeof(ResourcePacket));
+
+    Ptr<Socket> socket = Socket::CreateSocket(node, TypeId::LookupByName("ns3::UdpSocketFactory"));
+
+    InetSocketAddress destAddr(serverAddress, port);
+    socket->SendTo(udpPacket, 0, destAddr);
+}
+
+
 
 // دالة لحساب استهلاك الطاقة
 double ComputeEnergyConsumption(double cpuFreq, double tau, double mu, double G) {
