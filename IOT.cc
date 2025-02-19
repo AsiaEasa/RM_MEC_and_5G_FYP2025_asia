@@ -9,31 +9,32 @@
 #include <vector>
 #include <tuple>
 #include <random>
-#include <cstdint>  // لاستخدام uint8_t
-#include <cstring>  // يمكن أن تكون مفيدة للبعض العمليات على البيانات
-#include "ns3/wifi-module.h"
-#include "ns3/yans-wifi-helper.h"
-#include "ns3/mobility-helper.h"
-
 
 using namespace ns3;
 
 NS_LOG_COMPONENT_DEFINE("IoT_FL_Simulation");
-// تعريف هيكل بيانات الحزمة
-struct ResourcePacket {
-    double cpuFrequency;  // التردد المركزي (GHz)
-    double energy;        // الطاقة (Joules)
-    double bandwidth;     // عرض النطاق الترددي (Mbps)
-    bool wirelessCharging; // هل يوجد شحن لاسلكي
 
-    // Constructor for easy initialization
-    ResourcePacket(double cpu, double e, double bw, bool charge)
+// بنية الجهاز
+struct IoTDevice {
+    double cpuFrequency; // CPU - cycle freqyency for local training
+    double energy; //Energy level for client k
+    double bandwidth; // wireless bandwidth for client k
+    bool wirelessCharging;
+
+    IoTDevice(double cpu, double e, double bw, bool charge)
         : cpuFrequency(cpu), energy(e), bandwidth(bw), wirelessCharging(charge) {}
 };
 
+struct DeviceSpecsPacket {
+    double cpuFrequency;
+    double energy;
+    double bandwidth;
+    bool wirelessCharging;
+};
+
 // إنشاء الاجهزه وبياناتها 
-std::vector<ResourcePacket> GenerateIoTDevices(int numDevices) {
-    std::vector<ResourcePacket> devices;
+std::vector<IoTDevice> GenerateIoTDevices(int numDevices) {
+    std::vector<IoTDevice> devices;
     std::default_random_engine generator;
     std::uniform_real_distribution<double> cpuDist(0.1, 1.0); // توزيع CPU بين 0.1 و 1.0 GHz
     std::uniform_real_distribution<double> bandwidthDist(0.1, 2.0); // توزيع عرض النطاق بين 0.1 و 2.0 Mbps
@@ -49,15 +50,37 @@ std::vector<ResourcePacket> GenerateIoTDevices(int numDevices) {
     return devices;
 }
 
-int numIoTDevices = 4;
-std::vector<ResourcePacket> devicesData = GenerateIoTDevices(numIoTDevices);
+void SendDeviceSpecs(Ptr<Socket> socket, IoTDevice device) {
+    DeviceSpecsPacket packetData = {device.cpuFrequency, device.energy, device.bandwidth, device.wirelessCharging};
+    Ptr<Packet> packet = Create<Packet>((uint8_t *)&packetData, sizeof(packetData));
+    socket->Send(packet);
 
+    NS_LOG_INFO("Device sent specs: CPU " << device.cpuFrequency << " GHz, Energy "
+                << device.energy << " J, Bandwidth " << device.bandwidth << " Mbps, Charging "
+                << (device.wirelessCharging ? "Yes" : "No"));
+}
 
+void ReceiveDeviceSpecs(Ptr<Socket> socket) {
+    Ptr<Packet> packet;
+    Address from;
+    while ((packet = socket->RecvFrom(from))) {
+        if (packet->GetSize() == sizeof(DeviceSpecsPacket)) {
+            DeviceSpecsPacket receivedData;
+            packet->CopyData((uint8_t *)&receivedData, sizeof(DeviceSpecsPacket));
+
+            NS_LOG_INFO("Server received specs -> CPU: " << receivedData.cpuFrequency 
+                        << " GHz, Energy: " << receivedData.energy 
+                        << " J, Bandwidth: " << receivedData.bandwidth 
+                        << " Mbps, Wireless Charging: " 
+                        << (receivedData.wirelessCharging ? "Yes" : "No"));
+        }
+    }
+}
+//--------------------------------------------------
 // دالة لحساب استهلاك الطاقة
 double ComputeEnergyConsumption(double cpuFreq, double tau, double mu, double G) {
     return cpuFreq * cpuFreq * tau * (mu * 1e6) * G;
 }
-
 
 // دالة لمحاكاة وصول الطاقة باستخدام توزيع بواسون
 // تستبدل بي RF
@@ -66,65 +89,48 @@ int GenerateChargingEnergy(double avgRate) {
     std::default_random_engine generator;
     return distribution(generator);
 }
+//---------------------------------------------------
 
 
 int main(int argc, char *argv[]) {
     LogComponentEnable("IoT_FL_Simulation", LOG_LEVEL_INFO);
-
-    NodeContainer sensorNodes, gatewayNode, enbNodes;
+    int numIoTDevices = 4;
+    NodeContainer sensorNodes, gatewayNode;
     sensorNodes.Create(numIoTDevices);
     gatewayNode.Create(1);
-    enbNodes.Create(1);
 
-    // تثبيت البروتوكولات على العقد
+    PointToPointHelper p2p;
+    p2p.SetDeviceAttribute("DataRate", StringValue("10Mbps"));
+    p2p.SetChannelAttribute("Delay", StringValue("2ms"));
+
+    NetDeviceContainer devices;
+    for (int i = 0; i < numIoTDevices; i++) {
+        devices.Add(p2p.Install(sensorNodes.Get(i), gatewayNode.Get(0)));
+    }
+
     InternetStackHelper internet;
     internet.Install(sensorNodes);
     internet.Install(gatewayNode);
 
-    WifiHelper wifi;
-    wifi.SetStandard(WIFI_STANDARD_80211n);
-
-    // إعداد القناة الفيزيائية
-    YansWifiPhyHelper phy;
-    YansWifiChannelHelper channel = YansWifiChannelHelper::Default();
-    phy.SetChannel(channel.Create());
-    
-    // إعداد MAC
-    WifiMacHelper mac;
-    mac.SetType("ns3::AdhocWifiMac");
-    
-    // تثبيت أجهزة Wi-Fi على الأجهزة
-    NetDeviceContainer wifiDevices;
-    wifiDevices = wifi.Install(phy, mac, sensorNodes);
-    wifiDevices = wifi.Install(phy, mac, gatewayNode);
-
-    // تعيين عناوين IP
     Ipv4AddressHelper ipv4;
     ipv4.SetBase("10.1.1.0", "255.255.255.0");
-    Ipv4InterfaceContainer wifiInterfaces = ipv4.Assign(wifiDevices);
+    Ipv4InterfaceContainer interfaces = ipv4.Assign(devices);
 
     MobilityHelper mobility;
     Ptr<ListPositionAllocator> positionAlloc = CreateObject<ListPositionAllocator>();
-    
-    // تحديد مواقع الأجهزة
     for (int i = 0; i < numIoTDevices; i++) {
         positionAlloc->Add(Vector(i * 10, 20, 0));
     }
-    
-    // إضافة مواقع لعقد الشبكة الأخرى
-    positionAlloc->Add(Vector(50, 50, 0)); // gatewayNode
-    positionAlloc->Add(Vector(60, 60, 0)); // enbNode
-    positionAlloc->Add(Vector(70, 70, 0)); // pgw
-    
+    positionAlloc->Add(Vector(50, 50, 0));
+
     mobility.SetPositionAllocator(positionAlloc);
     mobility.SetMobilityModel("ns3::ConstantPositionMobilityModel");
-    
-    // تطبيق الحركة على جميع العقد
     mobility.Install(sensorNodes);
     mobility.Install(gatewayNode);
-    mobility.Install(enbNodes);
-    
 
+    // --------------------------------------------------------------------
+    // إنشاء الأجهزة وطباعة بياناتها
+    std::vector<IoTDevice> devicesData = GenerateIoTDevices(numIoTDevices);
     for (int i = 0; i < numIoTDevices; i++) {
         NS_LOG_INFO("Device " << i + 1 << " -> CPU: " << devicesData[i].cpuFrequency 
                                << " GHz, Energy: " << devicesData[i].energy 
@@ -133,6 +139,8 @@ int main(int argc, char *argv[]) {
                                << (devicesData[i].wirelessCharging ? "Yes" : "No"));
     }
 
+    // اختيار الأجهزة للتدريب
+    // هنا حيدخل كود الخوارزميه
     std::vector<int> selectedDevices;
     for (int i = 0; i < numIoTDevices; i++) {
         if (devicesData[i].energy > 2000 && devicesData[i].cpuFrequency >= 0.2) {
@@ -141,44 +149,55 @@ int main(int argc, char *argv[]) {
     }
     NS_LOG_INFO("Selected devices for federated training: " << selectedDevices.size());
 
-    double avgEnergyArrivalRate = 5.0;
-    double tau = 1e-28;
-    double mu = 1e6;
-    double G = 7000;
+    // إعداد متغيرات استهلاك وإعادة شحن الطاقة
+    double avgEnergyArrivalRate = 5.0;  // معدل وصول الطاقة
+    double tau = 1e-28;  // Effective switched capacitance
+    double mu = 1e6;  // 1 MB محولة إلى بايت - corresponding training data requirements - دي بحددها السيرفر
+    double G = 7000;  //   Number of CPU cycle required to process one bit local data
 
+    // تنفيذ عملية التعلم الفيدرالي وتحديث الطاقة
     for (int id : selectedDevices) {
+
         double energyConsumed = ComputeEnergyConsumption(devicesData[id].cpuFrequency, tau, mu, G);
         int chargingEnergy = GenerateChargingEnergy(avgEnergyArrivalRate);
+
+        // تحديث حالة الطاقة
         devicesData[id].energy = std::max(devicesData[id].energy - energyConsumed + chargingEnergy, 0.0);
+
         NS_LOG_INFO("Device " << id + 1 << " trained the model and sent updates, remaining energy: " 
                      << devicesData[id].energy << " J");
     }
 
-    PacketSinkHelper packetSinkHelper("ns3::UdpSocketFactory", InetSocketAddress(Ipv4Address::GetAny(), 9));
-    ApplicationContainer sinkApp = packetSinkHelper.Install(gatewayNode.Get(0));
-    sinkApp.Start(Seconds(1.0));
-    sinkApp.Stop(Seconds(10.0));
-    
-    // إعداد تطبيق OnOff لتوليد البيانات
-    OnOffHelper onoff("ns3::UdpSocketFactory", InetSocketAddress(wifiInterfaces.GetAddress(0), 9));
-    onoff.SetAttribute("DataRate", StringValue("500kbps"));
-    onoff.SetAttribute("PacketSize", UintegerValue(sizeof(ResourcePacket)));
-    
+    // --------------------------------------------------------------------
+
+    // إعداد الأجهزة لإرسال البيانات إلى الخادم
+    uint16_t port = 8080;
+    TypeId tid = TypeId::LookupByName("ns3::UdpSocketFactory");
+    Ptr<Socket> serverSocket = Socket::CreateSocket(gatewayNode.Get(0), tid);
+    serverSocket->Bind(InetSocketAddress(Ipv4Address::GetAny(), port));
+    serverSocket->SetRecvCallback(MakeCallback(&ReceiveDeviceSpecs));
+
     for (int i = 0; i < numIoTDevices; i++) {
-        ApplicationContainer clientApp = onoff.Install(sensorNodes.Get(i));
-        clientApp.Start(Seconds(2.0 + i));
-        clientApp.Stop(Seconds(10.0));
+        Ptr<Socket> clientSocket = Socket::CreateSocket(sensorNodes.Get(i), tid);
+        clientSocket->Connect(InetSocketAddress(interfaces.GetAddress(numIoTDevices), port));
+        Simulator::Schedule(Seconds(2.0 + i), &SendDeviceSpecs, clientSocket, devicesData[i]);
     }
 
+
+    // دعم NetAnim
     AnimationInterface anim("iot-simulation.xml");
+    for (uint32_t i = 0; i < sensorNodes.GetN(); i++) {
+        anim.SetConstantPosition(sensorNodes.Get(i), i * 10, 20);
+    }
+    anim.SetConstantPosition(gatewayNode.Get(0), 50, 50);
+    anim.UpdateNodeColor(sensorNodes.Get(0), 255, 0, 0);  
+    anim.UpdateNodeColor(gatewayNode.Get(0), 0, 0, 255);  
+    anim.EnablePacketMetadata(true);  
+    anim.EnableIpv4RouteTracking("route-tracking.xml", Seconds(0), Seconds(10), Seconds(0.25));
+
     Simulator::Stop(Seconds(20.0));
     Simulator::Run();
-    for (uint32_t i = 0; i < NodeList::GetNNodes(); i++) { // دي تجربه عشان كان في ايرور في الانيميشن فيه عقد مامعمول ليها موبيليتي
-        Ptr<Node> node = NodeList::GetNode(i);
-        if (node->GetObject<MobilityModel>() == nullptr) {
-            std::cout << "تحذير: العقدة " << i << " ليس لديها نموذج حركة!" << std::endl;
-        }
-    }    
     Simulator::Destroy();
+
     return 0;
 }
