@@ -29,9 +29,10 @@ void SendDeviceSpecs(Ptr<Socket> socket, IoTDevice device) {
     NS_LOG_INFO("Device sent specs: " << msg.str());
 }
 
-
 int main(int argc, char *argv[]) {
     LogComponentEnable("IoT_FL_Simulation", LOG_LEVEL_INFO);
+    LogComponentEnable("IoTDevice", LOG_LEVEL_INFO); // ----------------- Add this to allow the iot-device to use it --------
+    LogComponentEnable("MecServer", LOG_LEVEL_INFO); // ----------------- Add this to allow the mec-server to use it --------
     int numIoTDevices = 4;
 
     NodeContainer iotNodes, mecServerNode;
@@ -85,6 +86,21 @@ int main(int argc, char *argv[]) {
         Simulator::Schedule(Seconds(2.0 + i), &SendDeviceSpecs, clientSocket, devicesData[i]);
     }
 
+    // قبل نحسب استهلاك الطاقه مفروض نضيف النموذج ونرسله للاجهزه وندخل الداتا للاجهزه ويتم التدريب 
+    // ------------ADD NEW to compute the energy----------------------
+    double avgEnergyArrivalRate = 5.0;
+    double tau = 1e-28;
+    double mu = 1e22; // مفروض يحددها السيرفر ويحدد معاها عدد دورات التدريب للجهاز
+    double G = 7000;
+
+    for (int i = 0; i < numIoTDevices; i++) {
+        double energyConsumed = ComputeEnergyConsumption(devicesData[i].GetCpuFrequency(), tau, mu, G);
+        int chargingEnergy = GenerateChargingEnergy(avgEnergyArrivalRate);
+        devicesData[i].UpdateEnergy(energyConsumed, chargingEnergy);
+    }
+
+    // ------------------------------------------------------------------------
+    
     AnimationInterface anim("iot-mec-simulation.xml");
     anim.EnablePacketMetadata(true);
     Simulator::Stop(Seconds(20.0));
