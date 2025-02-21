@@ -5,9 +5,9 @@ namespace ns3 {
 
 NS_LOG_COMPONENT_DEFINE("IoTDevice");
 // Constructor
-IoTDevice::IoTDevice(double cpu, double energy, double bandwidth, bool charge, double chargingRate)
+IoTDevice::IoTDevice(double cpu, double energy, double bandwidth, bool charge)
     : m_cpuFrequency(cpu), m_energy(energy), m_bandwidth(bandwidth),
-      m_wirelessCharging(charge), m_initialEnergy(energy), m_chargingRate(chargingRate) {}
+      m_wirelessCharging(charge), m_initialEnergy(energy) {}
 
 
 // Getters
@@ -22,15 +22,13 @@ std::vector<IoTDevice> GenerateIoTDevices(int numDevices) {
     std::default_random_engine generator;
     std::uniform_real_distribution<double> cpuDist(0.1, 1.0);
     std::uniform_real_distribution<double> bandwidthDist(0.1, 2.0);
-    std::uniform_real_distribution<double> chargingRateDist(5.0, 15.0);  // ✅ معدل الشحن العشوائي
 
     for (int i = 0; i < numDevices; i++) {
         double cpu = cpuDist(generator);
         double bandwidth = bandwidthDist(generator);
         double energy = 5000 + (cpu * 1000);
-        double chargingRate = chargingRateDist(generator);  // ✅ توليد معدل الشحن
 
-        devices.emplace_back(cpu, energy, bandwidth, true, chargingRate);  // ✅ تمرير `chargingRate`
+        devices.emplace_back(cpu, energy, bandwidth, true);
     }
     return devices;
 }
@@ -56,7 +54,7 @@ void IoTDevice::UpdateEnergy(double energyConsumed, int chargingEnergy) {
 
     // ✅ إذا انخفضت الطاقة أكثر من 50% من الطاقة الأصلية، يبدأ الشحن
     if (newEnergy < 0.5 * m_initialEnergy) {
-        int extraCharge = GenerateChargingEnergy(m_chargingRate);  // يمكن تعديل معدل الشحن حسب الحاجة
+        int extraCharge = GenerateChargingEnergy(1.0);  // يمكن تعديل معدل الشحن حسب الحاجة
         newEnergy += extraCharge;
         NS_LOG_INFO("Device is charging: +" << extraCharge << " J (after dropping below 50%)");
     }
