@@ -7,7 +7,7 @@ namespace ns3 {
 
 class IoTDevice {
 public:
-    IoTDevice(double cpu, double energy, double bandwidth, bool charge, double chargingRate);
+    IoTDevice(double cpu, double energy, double bandwidth, bool charge);
     double GetCpuFrequency() const;
     double GetEnergy() const;
     double GetBandwidth() const;
@@ -20,7 +20,6 @@ private:
     double m_bandwidth;
     bool m_wirelessCharging;
     double m_initialEnergy;
-    double m_chargingRate;
 };
 
 std::vector<IoTDevice> GenerateIoTDevices(int numDevices);
